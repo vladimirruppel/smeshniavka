@@ -14,7 +14,7 @@ proactive:
   temperature: 0.9
   max_output_tokens: 300
 media_analyze:
-  temperature: 0.3
+  temperature: 1
   max_output_tokens: 1500
 dossier_extract:
   temperature: 0.1
