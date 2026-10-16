@@ -144,7 +144,7 @@ class DossierWorker:
             lane="sys",
         )
 
-        if not result:
+        if not result or not isinstance(result, DossierExtract):
             logger.warning("Dossier extract call returned empty/failed")
             return False
 

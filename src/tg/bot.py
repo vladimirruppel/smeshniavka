@@ -1445,7 +1445,7 @@ class FunnyBotApp:
             lane=LANE_CHAT,
         )
 
-        if not decision:
+        if not decision or not isinstance(decision, ProactiveDecision):
             return
 
         if decision.action.value == "reply" and decision.reply:

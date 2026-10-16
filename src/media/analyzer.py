@@ -386,7 +386,7 @@ class MediaAnalyzer:
             lane=resolved_lane,
         )
 
-        if not analysis_obj:
+        if not analysis_obj or not isinstance(analysis_obj, MediaAnalysis):
             logger.warning("media_analyze call failed for file %s", file_unique_id)
             return None
 

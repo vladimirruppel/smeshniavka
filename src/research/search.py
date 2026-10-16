@@ -226,11 +226,12 @@ class ResearchModule:
             lane="chat",
         )
 
-        need_search = (dec_result.need_search if dec_result else False) or forced
+        is_decision = isinstance(dec_result, ResearchDecision)
+        need_search = (dec_result.need_search if is_decision else False) or forced
         if not need_search:
             return False, None
 
-        raw_query = (dec_result.query if dec_result and dec_result.query else current_text)
+        raw_query = (dec_result.query if is_decision and dec_result.query else current_text)
         safe_query = anonymize_query(raw_query, known_nicks, bot_aliases=self.config.BOT_ALIASES)
         if not safe_query and forced:
             # Fallback for forced search: strip commands/mentions and use current text
