@@ -176,3 +176,91 @@ async def test_send_queue_on_sent_callback():
     await q.stop()
     assert got and got[0][0] == 1 and got[0][2] == "хуюл" and got[0][3] == 10
     assert isinstance(got[0][1], int)
+
+
+def _candidates(tmp_path):
+    data = yaml.safe_load((tmp_path / "style_examples.candidates.yaml").read_text(encoding="utf-8"))
+    return data.get("candidates") or []
+
+
+def _bank(tmp_path):
+    data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
+    return data.get("examples") or []
+
+
+def _by_text(entries, text):
+    return [e for e in entries if (e["text"] if isinstance(e, dict) else e) == text]
+
+
+@pytest.mark.asyncio
+async def test_late_laughs_reach_already_collected_candidate(tmp_path):
+    """Сценарий заказчика: фразу собрали ДО смеяков, потом 1–2 смеха —
+    laughs долливаются кандидату, а не теряются."""
+    learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=30)
+    phrase = "ну и чё за дела"
+    # сообщение пришло раньше реакций — фраза уже в очереди кандидатов
+    assert await learner.collect_from_message(1, 5, phrase) is True
+    assert await learner.collect_reacted(
+        1, 7, phrase, direct=False, laughs=2, ctx="на что отвечали"
+    ) is True
+    queued = _by_text(_candidates(tmp_path), phrase)
+    assert len(queued) == 1
+    assert int(queued[0].get("laughs") or 0) == 2
+    assert queued[0].get("ctx") == "на что отвечали"
+
+
+@pytest.mark.asyncio
+async def test_promotion_keeps_laughs(tmp_path):
+    """Промоушен не обнуляет смеяки: запись в банке несёт laughs кандидата."""
+    learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=1)
+    phrase = "ну и чё за дела"
+    await learner.collect_from_message(1, 5, phrase)
+    await learner.collect_reacted(1, 7, phrase, direct=False, laughs=2, ctx="на что отвечали")
+    assert await learner.maybe_promote() == 1
+    promoted = _by_text(_bank(tmp_path), phrase)
+    assert len(promoted) == 1
+    assert int(promoted[0].get("laughs") or 0) == 2  # не прайм
+    assert promoted[0].get("ctx") == "на что отвечали"
+    # батч ушёл из очереди
+    assert _by_text(_candidates(tmp_path), phrase) == []
+
+
+@pytest.mark.asyncio
+async def test_late_laughs_promote_existing_bank_entry_to_prime(tmp_path):
+    """3+ смеха на уже промоушенной (laughs=0) фразе поднимают её в прайм."""
+    learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=1)
+    phrase = "че за жизня такая"
+    await learner.collect_from_message(1, 5, phrase)
+    assert await learner.maybe_promote() == 1
+    banked = _by_text(_bank(tmp_path), phrase)
+    assert len(banked) == 1 and int(banked[0].get("laughs") or 0) == 0
+    # поздние смеяки (фраза уже в банке) — поднимаем up to prime
+    assert await learner.collect_reacted(1, 7, phrase, direct=True, laughs=4) is True
+    banked = _by_text(_bank(tmp_path), phrase)
+    assert len(banked) == 1
+    assert int(banked[0].get("laughs") or 0) >= 3
+    # и она реально прайм для подвыборки промпта
+    from src.style.learner import sample_for_prompt
+    picked = sample_for_prompt(_bank(tmp_path), _read_pinned(tmp_path), 5)
+    assert any(phrase in p for p in picked)
+
+
+def _read_pinned(tmp_path):
+    data = yaml.safe_load((tmp_path / "style_examples.yaml").read_text(encoding="utf-8"))
+    return data.get("pinned") or []
+
+
+@pytest.mark.asyncio
+async def test_repeated_direct_laughs_no_duplicate_in_bank(tmp_path):
+    """Повторный direct=True на той же фразе обновляет laughs, но не плодит дубль."""
+    learner = _learner(tmp_path, FakeGateway(), max_active=32, batch=1)
+    phrase = "бум еблан дичь"
+    assert await learner.collect_reacted(1, 7, phrase, direct=True, laughs=3) is True
+    # ещё порция смеющихся (например, бот перезапустился/флэппинг трекера)
+    assert await learner.collect_reacted(1, 7, phrase, direct=True, laughs=5) is True
+    assert await learner.collect_reacted(1, 7, phrase, direct=True, laughs=5) is False  # без изменений
+    banked = _by_text(_bank(tmp_path), phrase)
+    assert len(banked) == 1
+    assert int(banked[0].get("laughs") or 0) == 5
+    assert len(_by_text(_candidates(tmp_path), phrase)) == 0
+

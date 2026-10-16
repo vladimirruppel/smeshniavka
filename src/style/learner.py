@@ -255,12 +255,22 @@ class StyleLearner:
     ) -> bool:
         """Кандидат по смеякам (с контекстом: на что был ответ).
 
+        Смеяки почти всегда приходят ПОЗЖЕ сбора фразы: handle_message уже
+        положил её в кандидаты (collect_from_message), а MessageReaction
+        приходит минутами спустя. Поэтому здесь не «берём или молча False»,
+        а ДОЛЛИВАЕМ сигнал: laughs существующей записи не понижается.
+        Возвращает True только если файловое состояние реально изменилось.
+
         direct=True (3+ смеяк): сразу в банк, минуя очередь и фильтр — смех чата
         и есть вердикт. Это НЕ пермач: при переполнении вытесняется решением ИИ
         на общих основаниях, пермач — только сиды. Безопасность кодовая:
-        PII-маска, без ссылок/упоминаний.
+        PII-маска, без ссылок/упоминаний. Если фраза уже в банке (промоушена
+        без смеяков) — поднимаем ей laughs (поздний хост чата = прайм), а если
+        в pinned — не трогаем сиды (False).
         direct=False (1–2 смеяки): в очередь на отбор обычным путём,
-        но префильтр мягче — короткое «бум»/«вау» тоже смотрим.
+        но префильтр мягче — короткое «бум»/«вау» тоже смотрим. Если фраза
+        уже висит в очереди кандидатов — обновляем ей laughs и ctx вместо
+        тихого False.
         """
         if not self.enabled or not text:
             return False
@@ -282,8 +292,35 @@ class StyleLearner:
             cand_path, active_path = self._paths()
             examples, pinned = self._read_active(active_path)
             if direct:
-                if clean in ({e["text"] for e in examples} | set(pinned)):
-                    return False
+                if clean in set(pinned):
+                    return False  # сиды пермача не трогаем
+                in_bank = next((e for e in examples if e["text"] == clean), None)
+                if in_bank is not None:
+                    # Фраза уже в банке (её промоушнули без смеяков) — поздние
+                    # смеяки не теряем, а поднимаем laughs до прайма (>=3)
+                    changed = False
+                    have_laughs = int(in_bank.get("laughs") or 0)
+                    new_laughs = max(have_laughs, int(laughs or 0), 3)
+                    if new_laughs != have_laughs:
+                        in_bank["laughs"] = new_laughs
+                        changed = True
+                    if clean_ctx and not (in_bank.get("ctx") or "").strip():
+                        in_bank["ctx"] = clean_ctx
+                        changed = True
+                    # Дубль из очереди кандидатов убрать: в банке уже есть
+                    candidates = self._read_yaml_list(cand_path, "candidates")
+                    left = [
+                        c for c in candidates
+                        if not (isinstance(c, dict) and c.get("text") == clean)
+                    ]
+                    if len(left) != len(candidates):
+                        self._write_yaml(cand_path, {"candidates": left})
+                        changed = True
+                    if not changed:
+                        return False
+                    self._write_yaml(active_path, {"examples": examples, "pinned": pinned})
+                    logger.warning("Style learner: DIRECT laughs updated in bank (%.40s...)", clean)
+                    return True
                 examples.append({
                     "text": clean, "ctx": clean_ctx,
                     "laughs": max(3, int(laughs or 3)), "ts": int(time.time()),
@@ -295,7 +332,31 @@ class StyleLearner:
                 self._write_yaml(cand_path, {"candidates": candidates})
                 logger.warning("Style learner: DIRECT to bank by laughs (%.40s...)", clean)
             else:
+                if clean in set(pinned):
+                    return False  # сиды пермача не трогаем
                 candidates = self._read_yaml_list(cand_path, "candidates")
+                queued = next(
+                    (c for c in candidates if isinstance(c, dict) and c.get("text") == clean),
+                    None,
+                )
+                # Фраза уже в очереди (её собрал collect_from_message ещё до
+                # смеяков) — не теряем сигнал, а долливаем смеяки кандидату
+                if queued is not None:
+                    changed = False
+                    have_laughs = int(queued.get("laughs") or 0)
+                    new_laughs = max(have_laughs, int(laughs or 0))
+                    if new_laughs != have_laughs:
+                        queued["laughs"] = new_laughs
+                        changed = True
+                    if clean_ctx and not (queued.get("ctx") or "").strip():
+                        queued["ctx"] = clean_ctx
+                        changed = True
+                    if not changed:
+                        return False
+                    ok = self._write_yaml(cand_path, {"candidates": candidates})
+                    if ok:
+                        logger.info("Style learner: laughed candidate updated (%.40s...)", clean)
+                    return ok
                 if clean in self._known_texts(candidates, examples, pinned):
                     return False
                 cid = f"c{int(time.time())}{random.randint(100, 999)}"
